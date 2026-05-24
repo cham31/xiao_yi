@@ -12,7 +12,6 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 class PetState(Enum):
     IDLE = auto()
     BREATH = auto()
-    BLINK = auto()
     CLICKED = auto()
     DRAGGED = auto()
     SWEAT = auto()
@@ -29,7 +28,6 @@ class PetStateMachine(QObject):
     - 动画结束 → IDLE
     """
 
-    state_changed = pyqtSignal(PetState, PetState)  # old, new
     request_animation = pyqtSignal(str)  # "idle_loop" | "breath" | "click" | "drag" | "sleep" | "sweat"
 
     IDLE_SUBTIMER_MS = 4000
@@ -118,14 +116,12 @@ class PetStateMachine(QObject):
         if old == new and new != PetState.BREATH:
             return
         self._state = new
-        self.state_changed.emit(old, new)
         self._emit_animation_request(new)
 
     def _emit_animation_request(self, state: PetState) -> None:
         mapping = {
             PetState.IDLE: "idle_loop",
             PetState.BREATH: "breath",
-            PetState.BLINK: "blink",
             PetState.CLICKED: "click",
             PetState.DRAGGED: "drag",
             PetState.SWEAT: "sweat",

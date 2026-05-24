@@ -55,8 +55,6 @@ class PetApplication:
         player.finished.connect(sm.on_animation_finished)
 
         sm.request_animation.connect(self._play_for_request)
-        sm.state_changed.connect(self._on_state_changed)
-
         inter.clicked.connect(sm.on_mouse_click)
         inter.drag_started.connect(self._on_drag_start)
         inter.drag_ended.connect(self._on_drag_end)
@@ -69,38 +67,28 @@ class PetApplication:
     def _on_frame(self, pixmap) -> None:
         self._window.set_frame(pixmap)
 
-    def _on_state_changed(self, _old: PetState, new: PetState) -> None:
-        pass  # 不再改变透明度，保持 sleep 状态机逻辑不变
-
     def _on_drag_start(self) -> None:
         self._state_machine.on_drag_start()
-        drag = self._assets["drag"]
-        if len(drag) >= 4:
-            self._player.play_loop(drag[:4])
+        self._player.show_static(self._assets["expressions"]["idle"])
 
     def _on_drag_end(self, throw_distance: float) -> None:
-        drag = self._assets["drag"]
-        if drag and len(drag) >= 5:
-            self._player.show_static(drag[4])
         self._state_machine.on_drag_end(throw_distance)
 
     def _play_for_request(self, key: str) -> None:
         idle = self._assets["idle"]
-        idle_no_blink = idle[:4] + idle[8:]  # exclude blink frames (indices 4-7)
+        sleep = self._assets.get("sleep") or []
         expr = self._assets["expressions"]
 
         handlers = {
-            "idle_loop": lambda: self._player.play_loop(idle_no_blink),
+            "idle_loop": lambda: self._player.play_loop(idle),
             "breath": lambda: self._player.play_subrange_once(
-                idle, 0, 4, self._state_machine.on_animation_finished
+                idle, 0, len(idle), self._state_machine.on_animation_finished
             ),
             "click": lambda: self._player.play_once(
                 self._assets["click"], self._state_machine.on_animation_finished
             ),
-            "drag": lambda: self._player.play_once(
-                self._assets["drag"], self._state_machine.on_animation_finished
-            ),
-            "sleep": lambda: self._player.show_static(expr.get("sleep", expr["idle"])),
+            "drag": lambda: self._player.show_static(expr.get("idle", idle[0])),
+            "sleep": lambda: self._player.play_loop(sleep or [expr.get("sleep", expr["idle"])]),
             "sweat": lambda: self._player.show_static(expr.get("sweat", expr["idle"])),
         }
         if key == "idle_loop":
@@ -177,8 +165,8 @@ class PetApplication:
 
         n_idle = len(self._assets["idle"])
         n_click = len(self._assets["click"])
-        n_drag = len(self._assets["drag"])
-        print(f"[宠物] 启动成功 | 待机{n_idle}帧 点击{n_click}帧 拖拽{n_drag}帧")
+        n_sleep = len(self._assets["sleep"])
+        print(f"[宠物] 启动成功 | 站立{n_idle}帧 趴地{n_sleep}帧 点击{n_click}帧")
         print(f"       资源: {self._assets_dir}")
 
         return app.exec()
