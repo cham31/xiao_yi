@@ -74,7 +74,6 @@ class InteractionHandler(QObject):
     drag_ended = pyqtSignal(float)  # throw distance
     hover_changed = pyqtSignal(bool)
     expression_forced = pyqtSignal(str)
-    mute_toggled = pyqtSignal(bool)
     quit_requested = pyqtSignal()
 
     def __init__(self, parent_widget, parent: QObject | None = None):
@@ -86,17 +85,12 @@ class InteractionHandler(QObject):
         self._window_start = QPoint()
         self._last_pos = QPoint()
         self._hovering = False
-        self._muted = False
 
         self._physics = DragPhysics(self._apply_velocity, self)
 
     @property
     def is_dragging(self) -> bool:
         return self._dragging
-
-    @property
-    def is_muted(self) -> bool:
-        return self._muted
 
     def hit_opaque(self, local_x: int, local_y: int, alpha_at) -> bool:
         """alpha_at(x,y) -> 0-255；不透明才响应"""
@@ -156,13 +150,5 @@ class InteractionHandler(QObject):
             act = expr_menu.addAction(label)
             act.triggered.connect(lambda _, k=key: self.expression_forced.emit(k))
 
-        mute_act = menu.addAction("静音 ✓" if self._muted else "静音")
-        mute_act.triggered.connect(self._toggle_mute)
-
-        menu.addSeparator()
         menu.addAction("退出", self.quit_requested.emit)
         menu.exec(global_pos)
-
-    def _toggle_mute(self) -> None:
-        self._muted = not self._muted
-        self.mute_toggled.emit(self._muted)

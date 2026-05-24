@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
 DEFAULT_FPS = 12
 FADE_MS = 200
-DISPLAY_SIZE = 300
+DISPLAY_SIZE = 128
 
 
 def _placeholder(size: int = DISPLAY_SIZE) -> QPixmap:
@@ -32,11 +32,11 @@ def _placeholder(size: int = DISPLAY_SIZE) -> QPixmap:
 
 
 class AssetLoader:
-    """从 assets/ 目录加载序列帧与表情差分"""
+    """加载当前塔菲全身桌宠序列帧与表情图"""
 
     def __init__(self, assets_dir: str, display_size: int = DISPLAY_SIZE):
         self.assets_dir = assets_dir
-        self.anim_dir = os.path.join(assets_dir, "animations")
+        self.anim_dir = os.path.join(assets_dir, "taffy_fullbody", "animations")
         self.display_size = display_size
 
     def _scale(self, pix: QPixmap) -> QPixmap:
@@ -74,22 +74,18 @@ class AssetLoader:
         return [self.load_frame(f) for f in files]
 
     def load_expression(self, name: str) -> QPixmap:
-        """加载 expr_{name}.png，回退到 assets/{name}.png"""
-        paths = [
-            os.path.join(self.anim_dir, f"expr_{name}.png"),
-            os.path.join(self.assets_dir, f"{name}.png"),
-        ]
-        for path in paths:
-            if os.path.isfile(path):
-                return self.load_frame(path)
+        """加载 expr_{name}.png"""
+        path = os.path.join(self.anim_dir, f"expr_{name}.png")
+        if os.path.isfile(path):
+            return self.load_frame(path)
         print(f"[AssetLoader] 表情缺失: {name}")
         return _placeholder(self.display_size)
 
     def load_all(self) -> dict:
         return {
             "idle": self.load_sequence("idle"),
+            "sleep": self.load_sequence("sleep"),
             "click": self.load_sequence("click"),
-            "drag": self.load_sequence("drag"),
             "expressions": {
                 name: self.load_expression(name)
                 for name in ("idle", "smile", "grin", "sweat", "angry", "sleep")
