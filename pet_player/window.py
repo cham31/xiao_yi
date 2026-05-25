@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-import struct
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QAbstractNativeEventFilter
+from PyQt6.QtCore import Qt, QTimer, QAbstractNativeEventFilter, QPoint, pyqtSignal
 from PyQt6.QtGui import QPainter, QPixmap, QImage, QColor, QMouseEvent
 from PyQt6.QtWidgets import QWidget, QApplication
 
@@ -17,9 +16,28 @@ from pet_player.renderer import DISPLAY_SIZE
 # Windows WM_NCHITTEST
 if sys.platform == "win32":
     import ctypes
+    from ctypes import wintypes
 
     HTTRANSPARENT = -1
     WM_NCHITTEST = 0x0084
+
+
+    class POINT(ctypes.Structure):
+        _fields_ = [
+            ("x", wintypes.LONG),
+            ("y", wintypes.LONG),
+        ]
+
+
+    class MSG(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("message", wintypes.UINT),
+            ("wParam", wintypes.WPARAM),
+            ("lParam", wintypes.LPARAM),
+            ("time", wintypes.DWORD),
+            ("pt", POINT),
+        ]
 
 
 class AlphaPassthroughFilter(QAbstractNativeEventFilter):
@@ -33,6 +51,7 @@ class AlphaPassthroughFilter(QAbstractNativeEventFilter):
         super().__init__()
         self._window = window
         self._threshold = threshold
+        self._hwnd = int(window.winId())
 
     def nativeEventFilter(self, eventType, message) -> tuple[bool, int]:
         if sys.platform != "win32":
@@ -45,9 +64,11 @@ class AlphaPassthroughFilter(QAbstractNativeEventFilter):
             return False, 0
 
         try:
-            data = ctypes.string_at(ptr, 48)
-            msg_id = struct.unpack_from("I", data, 8)[0]
-            if msg_id != WM_NCHITTEST:
+            msg = MSG.from_address(ptr)
+            if int(msg.hwnd) != self._hwnd:
+                return False, 0
+
+            if msg.message != WM_NCHITTEST:
                 return False, 0
 
             win = self._window
@@ -69,12 +90,14 @@ class PetWindow(QWidget):
     """
 
     ALPHA_THRESHOLD = 50
+    moved = pyqtSignal()
 
     def __init__(self, size: int = DISPLAY_SIZE):
         super().__init__()
         self._size = size
         self._current_pixmap: QPixmap | None = None
         self._alpha_image: QImage | None = None
+        self._screen_margins = (0, 0, 0, 0)
 
         self.interaction = InteractionHandler(self)
 
@@ -104,6 +127,25 @@ class PetWindow(QWidget):
             return 0
         return QColor(self._alpha_image.pixel(x, y)).alpha()
 
+    def move(self, *args) -> None:
+        if len(args) == 1 and isinstance(args[0], QPoint):
+            super().move(self._clamped_pos(args[0]))
+            return
+        if len(args) == 2:
+            super().move(self._clamped_pos(QPoint(int(args[0]), int(args[1]))))
+            return
+        super().move(*args)
+
+    def set_screen_margins(self, left: int = 0, top: int = 0, right: int = 0, bottom: int = 0) -> None:
+        """Reserve dynamic space for visible companion widgets without changing screen bounds."""
+        self._screen_margins = (
+            max(0, left),
+            max(0, top),
+            max(0, right),
+            max(0, bottom),
+        )
+        self.move(self.pos())
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
@@ -124,6 +166,30 @@ class PetWindow(QWidget):
             geo = screen.availableGeometry()
             self.move(geo.right() - self._size - 40, geo.bottom() - self._size - 80)
 
+    def _clamped_pos(self, pos: QPoint) -> QPoint:
+        screen = QApplication.screenAt(pos + QPoint(self.width() // 2, self.height() // 2))
+        if screen is None:
+            screen = QApplication.screenAt(self.pos() + QPoint(self.width() // 2, self.height() // 2))
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return pos
+
+        geo = screen.availableGeometry()
+        left_margin, top_margin, right_margin, bottom_margin = self._screen_margins
+        min_x = geo.left() + left_margin
+        min_y = geo.top() + top_margin
+        max_x = geo.right() - self.width() - right_margin + 1
+        max_y = geo.bottom() - self.height() - bottom_margin + 1
+        if min_x > max_x:
+            min_x = max_x = geo.left() + max(0, (geo.width() - self.width()) // 2)
+        if min_y > max_y:
+            min_y = max_y = geo.top() + max(0, (geo.height() - self.height()) // 2)
+        return QPoint(
+            max(min_x, min(pos.x(), max_x)),
+            max(min_y, min(pos.y(), max_y)),
+        )
+
     def _rebuild_alpha_mask(self) -> None:
         if self._current_pixmap.isNull():
             self._alpha_image = None
@@ -140,6 +206,10 @@ class PetWindow(QWidget):
         if self._current_pixmap and not self._current_pixmap.isNull():
             p.drawPixmap(0, 0, self._current_pixmap)
         p.end()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self.moved.emit()
 
     def _on_cursor_tick(self) -> None:
         if not self.interaction.is_dragging:
