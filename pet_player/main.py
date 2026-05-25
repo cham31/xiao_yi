@@ -11,9 +11,17 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PyQt6.QtCore import QThread
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtGui import QIcon
 
+from pet_player.ai_config import load_ai_config
+from pet_player.ai_settings_dialog import AiSettingsDialog
+from pet_player.pet_chat import (
+    ChatRequestWorker,
+    PetChatInputBubble,
+    SpeechBubbleWindow,
+)
 from pet_player.renderer import AssetLoader, AnimationPlayer, DISPLAY_SIZE
 from pet_player.window import PetWindow
 from pet_player.state_machine import PetState, PetStateMachine
@@ -32,6 +40,14 @@ class PetApplication:
         self._player: AnimationPlayer | None = None
         self._state_machine: PetStateMachine | None = None
         self._tray: QSystemTrayIcon | None = None
+        self._ai_chat_dialog: PetChatInputBubble | None = None
+        self._ai_dialog: AiSettingsDialog | None = None
+        self._speech_bubble: SpeechBubbleWindow | None = None
+        self._chat_thread: QThread | None = None
+        self._chat_worker: ChatRequestWorker | None = None
+        self._chat_messages: list[dict[str, str]] = []
+        self._pending_chat_text = ""
+        self._updating_chat_bounds = False
 
         self._hovering = False
         self._forced_expr: str | None = None
@@ -41,6 +57,7 @@ class PetApplication:
         self._assets = self._loader.load_all()
         self._window = PetWindow(DISPLAY_SIZE)
         self._window.install_alpha_filter(QApplication.instance())
+        self._window.moved.connect(self._on_pet_moved)
         self._player = AnimationPlayer()
         self._player.bind_opacity(self._window)
         self._state_machine = PetStateMachine()
@@ -60,6 +77,8 @@ class PetApplication:
         inter.drag_ended.connect(self._on_drag_end)
         inter.hover_changed.connect(self._on_hover)
         inter.expression_forced.connect(self._on_force_expression)
+        inter.ai_chat_requested.connect(self._show_ai_chat)
+        inter.ai_settings_requested.connect(self._show_ai_settings)
         inter.quit_requested.connect(self._quit)
 
         inter._physics.landed.connect(sm.on_animation_finished)
@@ -134,6 +153,8 @@ class PetApplication:
         self._tray.setToolTip("小艺 · 桌面宠物")
         menu = QMenu()
         menu.addAction("显示/隐藏", lambda: self._window.setVisible(not self._window.isVisible()))
+        menu.addAction("和小艺聊天", self._show_ai_chat)
+        menu.addAction("AI 设置", self._show_ai_settings)
         menu.addSeparator()
         menu.addAction("退出", self._quit)
         self._tray.setContextMenu(menu)
@@ -142,6 +163,156 @@ class PetApplication:
             if r == QSystemTrayIcon.ActivationReason.DoubleClick else None
         )
         self._tray.show()
+
+    def _show_ai_chat(self) -> None:
+        if self._speech_bubble is None:
+            self._speech_bubble = SpeechBubbleWindow(self._window)
+        if self._ai_chat_dialog is None:
+            self._ai_chat_dialog = PetChatInputBubble()
+            self._ai_chat_dialog.send_requested.connect(self._send_ai_chat)
+            self._ai_chat_dialog.finished.connect(lambda _: self._on_ai_chat_closed())
+        self._ai_chat_dialog.show_near(self._window)
+        self._update_chat_bounds()
+
+    def _send_ai_chat(self, text: str) -> None:
+        self._pending_chat_text = text
+        if self._chat_thread is not None:
+            if self._ai_chat_dialog:
+                self._ai_chat_dialog.restore_text(text)
+            if self._speech_bubble:
+                self._speech_bubble.show_message("我还在想上一个问题，等我一下。", timeout_ms=3500)
+            return
+
+        cfg = load_ai_config()
+        errors = cfg.validate()
+        if errors:
+            QMessageBox.warning(
+                self._ai_chat_dialog,
+                "AI 配置不完整",
+                "\n".join(errors) + "\n\n请先打开 AI 设置填写 DeepSeek API Key。",
+            )
+            if self._ai_chat_dialog:
+                self._ai_chat_dialog.restore_text(text)
+            self._show_ai_settings()
+            return
+
+        if self._speech_bubble is None:
+            self._speech_bubble = SpeechBubbleWindow(self._window)
+        self._speech_bubble.show_thinking()
+        self._update_chat_bounds()
+        if self._ai_chat_dialog:
+            self._ai_chat_dialog.set_busy(True)
+
+        self._chat_messages.append({"role": "user", "content": text})
+        self._trim_chat_messages()
+
+        self._chat_thread = QThread(self._window)
+        self._chat_worker = ChatRequestWorker(cfg, self._chat_messages)
+        self._chat_worker.moveToThread(self._chat_thread)
+        self._chat_thread.started.connect(self._chat_worker.run)
+        self._chat_worker.finished.connect(self._on_ai_chat_reply)
+        self._chat_worker.finished.connect(self._chat_thread.quit)
+        self._chat_worker.finished.connect(self._chat_worker.deleteLater)
+        self._chat_thread.finished.connect(self._chat_thread.deleteLater)
+        self._chat_thread.start()
+
+    def _on_ai_chat_reply(self, ok: bool, message: str) -> None:
+        if self._ai_chat_dialog:
+            self._ai_chat_dialog.set_busy(False)
+
+        self._chat_thread = None
+        self._chat_worker = None
+
+        if ok:
+            self._chat_messages.append({"role": "assistant", "content": message})
+            self._trim_chat_messages()
+            self._speech_bubble.show_message(message)
+            self._pending_chat_text = ""
+            self._update_chat_bounds()
+            if self._ai_chat_dialog:
+                self._ai_chat_dialog.ready_for_next_message()
+            return
+
+        if self._chat_messages and self._chat_messages[-1].get("role") == "user":
+            self._chat_messages.pop()
+        self._speech_bubble.show_message(f"发送失败: {message}", timeout_ms=7000)
+        self._update_chat_bounds()
+        if self._ai_chat_dialog and self._pending_chat_text:
+            self._ai_chat_dialog.restore_text(self._pending_chat_text)
+
+    def _trim_chat_messages(self) -> None:
+        if len(self._chat_messages) > 24:
+            self._chat_messages = self._chat_messages[-24:]
+
+    def _on_ai_chat_closed(self) -> None:
+        self._ai_chat_dialog = None
+        self._update_chat_bounds()
+
+    def _update_chat_bounds(self) -> None:
+        if self._updating_chat_bounds:
+            return
+        self._updating_chat_bounds = True
+        try:
+            self._apply_chat_bounds()
+        finally:
+            self._updating_chat_bounds = False
+
+    def _apply_chat_bounds(self) -> None:
+        left_margin = 0
+        if self._ai_chat_dialog and self._ai_chat_dialog.isVisible():
+            self._ai_chat_dialog.adjustSize()
+            left_margin = max(left_margin, self._ai_chat_dialog.width() + 10)
+        if self._speech_bubble and self._speech_bubble.isVisible():
+            self._speech_bubble.adjustSize()
+            left_margin = max(left_margin, self._speech_bubble.width() + 10)
+
+        self._window.set_screen_margins(left=left_margin)
+        self._layout_chat_bubbles()
+
+    def _layout_chat_bubbles(self) -> None:
+        reply_pos = None
+        if self._speech_bubble and self._speech_bubble.isVisible():
+            reply_pos = self._speech_bubble.default_position()
+
+        input_pos = None
+        if self._ai_chat_dialog and self._ai_chat_dialog.isVisible():
+            input_pos = self._ai_chat_dialog.default_position(self._window)
+            if reply_pos is not None:
+                input_pos = self._avoid_input_reply_overlap(input_pos, reply_pos)
+
+        if self._speech_bubble and self._speech_bubble.isVisible() and reply_pos is not None:
+            self._speech_bubble.move_to(reply_pos)
+        if self._ai_chat_dialog and self._ai_chat_dialog.isVisible() and input_pos is not None:
+            self._ai_chat_dialog.move_to(input_pos)
+
+    def _avoid_input_reply_overlap(self, input_pos, reply_pos):
+        input_rect = self._ai_chat_dialog.geometry()
+        reply_rect = self._speech_bubble.geometry()
+        input_rect.moveTopLeft(input_pos)
+        reply_rect.moveTopLeft(reply_pos)
+        if not input_rect.intersects(reply_rect):
+            return input_pos
+
+        screen = QApplication.screenAt(self._window.geometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return input_pos
+        available = screen.availableGeometry()
+        target_y = reply_rect.bottom() + 10
+        max_y = available.bottom() - input_rect.height() + 1
+        input_pos.setY(min(target_y, max_y))
+        return input_pos
+
+    def _on_pet_moved(self) -> None:
+        if self._ai_chat_dialog or (self._speech_bubble and self._speech_bubble.isVisible()):
+            self._update_chat_bounds()
+
+    def _show_ai_settings(self) -> None:
+        if self._ai_dialog is None:
+            self._ai_dialog = AiSettingsDialog()
+            self._ai_dialog.finished.connect(lambda _: setattr(self, "_ai_dialog", None))
+        self._ai_dialog.show()
+        self._ai_dialog.raise_()
+        self._ai_dialog.activateWindow()
 
     def _quit(self) -> None:
         self._state_machine.stop()
