@@ -74,6 +74,8 @@ class InteractionHandler(QObject):
     drag_ended = pyqtSignal(float)  # throw distance
     hover_changed = pyqtSignal(bool)
     expression_forced = pyqtSignal(str)
+    ai_chat_requested = pyqtSignal()
+    ai_settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
 
     def __init__(self, parent_widget, parent: QObject | None = None):
@@ -150,5 +152,10 @@ class InteractionHandler(QObject):
             act = expr_menu.addAction(label)
             act.triggered.connect(lambda _, k=key: self.expression_forced.emit(k))
 
+        menu.addSeparator()
+        menu.addAction("和小艺聊天", self.ai_chat_requested.emit)
+        menu.addAction("AI 设置", self.ai_settings_requested.emit)
+
+        menu.addSeparator()
         menu.addAction("退出", self.quit_requested.emit)
         menu.exec(global_pos)
